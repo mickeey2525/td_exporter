@@ -1,2 +1,3 @@
 .idea/
 prometheus_sample/data
+vendor/
