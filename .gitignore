@@ -1,3 +1,5 @@
 .idea/
 prometheus_sample/data
 vendor/
+grafana-data/*
+!grafana-data/.gitkeep

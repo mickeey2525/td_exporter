@@ -4,6 +4,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -11,12 +12,67 @@ import (
 )
 
 const (
-	namespace = "tdjobs_status"
+	namespace = "tdjobs"
 )
 
 type tdJobCollector struct {
 	ApiKey string
 	Region td_client.EndpointRouter
+}
+
+func (c *tdJobCollector) getRunningJobCount() (map[string]int, error) {
+	client, err := td_client.NewTDClient(td_client.Settings{
+		ApiKey: c.ApiKey,
+		Router: c.Region,
+	})
+
+	if err != nil {
+		log.Fatalf("Something went wrong when you create TD Clinet instance: %s", err)
+	}
+	var jobOptions = td_client.ListJobsOptions{}
+	jobOptions.WithStatus("running")
+	jl, err := client.ListJobsWithOptions(&jobOptions)
+	if err != nil {
+		log.Fatalf("Something went wrong during get running jobs: %s", err)
+	}
+
+	runningJobList := map[string]int{}
+	for i := range jl.ListJobsResultElements {
+		if jl.ListJobsResultElements[i].Status == "running" {
+			if _, ok := runningJobList[jl.ListJobsResultElements[i].Type]; !ok {
+				runningJobList[jl.ListJobsResultElements[i].Type] = 1
+			} else {
+				runningJobList[jl.ListJobsResultElements[i].Type]++
+			}
+		}
+	}
+
+	return runningJobList, nil
+}
+
+func (c *tdJobCollector) getQueuedJobCount() (map[string]int, error) {
+	client, err := td_client.NewTDClient(td_client.Settings{
+		ApiKey: c.ApiKey,
+		Router: c.Region,
+	})
+	if err != nil {
+		log.Fatalf("Something went wrong when you create TD Clinet instance: %s", err)
+	}
+	var jobOptions = td_client.ListJobsOptions{}
+	jobOptions.WithStatus("queued")
+	jl, err := client.ListJobsWithOptions(&jobOptions)
+	if err != nil {
+		log.Fatalf("failed to list queued jobs: %s", err)
+	}
+	queuedJobList := map[string]int{}
+	for i := range jl.ListJobsResultElements {
+		if _, ok := queuedJobList[jl.ListJobsResultElements[i].Type]; !ok {
+			queuedJobList[jl.ListJobsResultElements[i].Type] = 1
+		} else {
+			queuedJobList[jl.ListJobsResultElements[i].Type]++
+		}
+	}
+	return queuedJobList, nil
 }
 
 var (
@@ -100,7 +156,6 @@ func (c tdJobCollector) Collect(ch chan<- prometheus.Metric) {
 		log.Fatalf("error happened: %s\n", err)
 	}
 
-	log.Printf("the running joblist is %+v", countPerType)
 	ch <- prometheus.MustNewConstMetric(
 		runningPrestoJobCount.Desc(),
 		prometheus.CounterValue,
@@ -167,61 +222,6 @@ func (c tdJobCollector) Collect(ch chan<- prometheus.Metric) {
 	)
 }
 
-func (c *tdJobCollector) getRunningJobCount() (map[string]int, error) {
-	client, err := td_client.NewTDClient(td_client.Settings{
-		ApiKey: c.ApiKey,
-		Router: c.Region,
-	})
-
-	if err != nil {
-		log.Fatalf("Something went wrong when you create TD Clinet instance: %s", err)
-	}
-	var jobOptions = td_client.ListJobsOptions{}
-	jobOptions.WithStatus("running")
-	jl, err := client.ListJobsWithOptions(&jobOptions)
-	if err != nil {
-		log.Fatalf("Something went wrong during get running jobs: %s", err)
-	}
-
-	runningJobList := map[string]int{}
-	for i := range jl.ListJobsResultElements {
-		if _, ok := runningJobList[jl.ListJobsResultElements[i].Type]; !ok {
-			runningJobList[jl.ListJobsResultElements[i].Type] = 1
-		} else {
-			runningJobList[jl.ListJobsResultElements[i].Type]++
-		}
-	}
-	
-	return runningJobList, nil
-}
-
-func (c *tdJobCollector) getQueuedJobCount() (map[string]int, error) {
-	client, err := td_client.NewTDClient(td_client.Settings{
-		ApiKey: c.ApiKey,
-		Router: c.Region,
-	})
-	if err != nil {
-		log.Fatalf("Something went wrong when you create TD Clinet instance: %s", err)
-	}
-	var jobOptions = td_client.ListJobsOptions{}
-	jobOptions.WithStatus("queued")
-	jl, err := client.ListJobsWithOptions(&jobOptions)
-	if err != nil {
-		log.Fatalf("failed to list queued jobs: %s", err)
-	}
-	queuedJobList := map[string]int{}
-
-	for i := range jl.ListJobsResultElements {
-		if _, ok := queuedJobList[jl.ListJobsResultElements[i].Type]; !ok {
-			queuedJobList[jl.ListJobsResultElements[i].Type] = 1
-		} else {
-			queuedJobList[jl.ListJobsResultElements[i].Type]++
-		}
-	}
-	
-	return queuedJobList, nil
-}
-
 type Endpoint struct {
 	endpoint string
 }
@@ -232,7 +232,7 @@ func (e Endpoint) Route(s string) string {
 
 func main() {
 	var (
-		addr   = flag.String("listen-address", "127.0.0.1:5000", "The address to listen on for HTTP requests.")
+		addr   = flag.String("listen-address", ":5000", "The address to listen on for HTTP requests.")
 		apikey = flag.String("td-apikey", "", "Treasure Data API Key")
 		region = flag.String("endpoint", td_client.DEFAULT_ENDPOINT, "Treasure Data Region")
 	)
@@ -240,8 +240,16 @@ func main() {
 	flag.Parse()
 	endpoint := Endpoint{endpoint: *region}
 	if *apikey == "" {
-		log.Fatal("You must set apikey")
+		*apikey = os.Getenv("TD_API_KEY")
+		if *apikey == "" {
+			log.Fatal("Treasure Data API Key is not set")
+		}
 	}
+
+	if os.Getenv("TD_API_HOST") != "" {
+		endpoint.endpoint = os.Getenv("TD_API_HOST")
+	}
+	
 	c := tdJobCollector{
 		ApiKey: *apikey,
 		Region: endpoint,
